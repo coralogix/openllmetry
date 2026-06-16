@@ -665,9 +665,10 @@ class TestEndGenerationSpan:
         tracer, exporter = tracer_and_exporter
         otel_span = tracer.start_span("test-gen")
 
-        span_data = MagicMock()
-        span_data.input = [{"role": "user", "content": "Hello"}]
-        span_data.response = None
+        span_data = SimpleNamespace(
+            input=[{"role": "user", "content": "Hello"}],
+            response=None,
+        )
 
         processor._end_generation_span(otel_span, span_data, trace_content=True)
 
@@ -920,14 +921,47 @@ class TestEndGenerationSpan:
 
         otel_span.end()
 
+    def test_generation_span_data_uses_output_and_usage_fields(self, tracer_and_exporter, processor):
+        """Real GenerationSpanData stores output/usage on the span data itself."""
+        from agents import GenerationSpanData
+
+        tracer, _ = tracer_and_exporter
+        otel_span = tracer.start_span("test-gen")
+
+        span_data = GenerationSpanData(
+            input=[{"role": "user", "content": "Hello"}],
+            output=[{"role": "assistant", "content": "Hello back"}],
+            model="gpt-4o-mini",
+            model_config={
+                "temperature": 0.7,
+                "max_tokens": 100,
+                "top_p": 1.0,
+                "frequency_penalty": 0.5,
+            },
+            usage={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+        )
+
+        processor._end_generation_span(otel_span, span_data, trace_content=True)
+
+        assert otel_span.attributes.get(GenAIAttributes.GEN_AI_RESPONSE_MODEL) == "gpt-4o-mini"
+        assert otel_span.attributes.get(GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS) == 3
+        raw = otel_span.attributes.get(GenAIAttributes.GEN_AI_OUTPUT_MESSAGES)
+        assert raw is not None
+        messages = json.loads(raw)
+        assert messages[0]["role"] == "assistant"
+        assert messages[0]["parts"][0]["content"] == "Hello back"
+
+        otel_span.end()
+
     def test_no_response_no_crash(self, tracer_and_exporter, processor):
         """span_data.response=None must not raise."""
         tracer, exporter = tracer_and_exporter
         otel_span = tracer.start_span("test-gen")
 
-        span_data = MagicMock()
-        span_data.input = []
-        span_data.response = None
+        span_data = SimpleNamespace(
+            input=[],
+            response=None,
+        )
 
         # Should not raise
         processor._end_generation_span(otel_span, span_data, trace_content=True)

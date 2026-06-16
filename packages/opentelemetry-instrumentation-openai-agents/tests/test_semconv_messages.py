@@ -153,7 +153,6 @@ class TestProviderName:
             OpenTelemetryTracingProcessor,
         )
         from agents import GenerationSpanData
-
         tracer, exporter = tracer_and_exporter
         proc = OpenTelemetryTracingProcessor(tracer)
 
@@ -1226,19 +1225,19 @@ class TestToolDefinitions:
         mock_trace.trace_id = "test-td-1"
         proc.on_trace_start(mock_trace)
 
-        gen_data = GenerationSpanData(model="gpt-4o", model_config={})
-        gen_data.input = []
+        span_data = ResponseSpanData(input=[], response=None)
+        span_data.model = "gpt-4o"
 
         # Create response with tools
         func = MockFunction(name="search", description="Search for data", parameters={"type": "object"})
         tool = MockTool(function=func, type="function")
-        gen_data.response = MockResponse(
+        span_data.response = MockResponse(
             model="gpt-4o",
             tools=[tool],
             usage=MockUsage(),
         )
 
-        span = MockAgentSpan(gen_data, trace_id="test-td-1")
+        span = MockAgentSpan(span_data, trace_id="test-td-1")
 
         proc.on_span_start(span)
         proc.on_span_end(span)
@@ -1521,7 +1520,6 @@ class TestNoDeprecatedAttributes:
             OpenTelemetryTracingProcessor,
         )
         from agents import GenerationSpanData
-
         tracer, exporter = tracer_and_exporter
         proc = OpenTelemetryTracingProcessor(tracer)
 
@@ -1620,8 +1618,9 @@ class TestContentGating:
         mock_trace.trace_id = "test-gate-tools"
         proc.on_trace_start(mock_trace)
 
-        gen_data = GenerationSpanData(model="gpt-4o", model_config={})
-        span_obj = MockAgentSpan(gen_data, trace_id="test-gate-tools")
+        span_data = ResponseSpanData(input=[], response=None)
+        span_data.model = "gpt-4o"
+        span_obj = MockAgentSpan(span_data, trace_id="test-gate-tools")
 
         func_mock = MagicMock()
         func_mock.name = "lookup"
@@ -1645,7 +1644,7 @@ class TestContentGating:
             finish_reason=None,
             status=None,
         )
-        gen_data.response = response_mock
+        span_data.response = response_mock
 
         with patch(
             "opentelemetry.instrumentation.openai_agents._hooks.should_send_prompts",
@@ -2614,7 +2613,6 @@ class TestRequestModelAtSpanStart:
             OpenTelemetryTracingProcessor,
         )
         from agents import GenerationSpanData
-
         tracer, exporter = tracer_and_exporter
         proc = OpenTelemetryTracingProcessor(tracer)
 
@@ -2654,21 +2652,23 @@ class TestRequestModelAtSpanStart:
         mock_trace.trace_id = "test-reqmodel-2"
         proc.on_trace_start(mock_trace)
 
-        gen_data = GenerationSpanData(model="gpt-4o", model_config={})
-        # Simulate a response with no model
-        gen_data.response = MagicMock()
-        gen_data.response.model = None
-        gen_data.response.id = None
-        gen_data.response.temperature = None
-        gen_data.response.max_output_tokens = None
-        gen_data.response.top_p = None
-        gen_data.response.frequency_penalty = None
-        gen_data.response.finish_reason = None
-        gen_data.response.output = []
-        gen_data.response.usage = None
-        gen_data.response.tools = []
+        span_data = ResponseSpanData(input=[], response=None)
+        span_data.model = "gpt-4o"
+        span_data.response = SimpleNamespace(
+            model=None,
+            id=None,
+            temperature=None,
+            max_output_tokens=None,
+            top_p=None,
+            frequency_penalty=None,
+            finish_reason=None,
+            status=None,
+            output=[],
+            usage=None,
+            tools=[],
+        )
 
-        span = MockAgentSpan(gen_data, trace_id="test-reqmodel-2")
+        span = MockAgentSpan(span_data, trace_id="test-reqmodel-2")
         proc.on_span_start(span)
         proc.on_span_end(span)
         proc.on_trace_end(mock_trace)

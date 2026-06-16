@@ -116,6 +116,8 @@ def _response_item_finish_reason(
     preserve_cancelled_status: bool = False,
 ) -> str:
     item_type = _response_get_attr(output_item, "type", None)
+    if _response_get_attr(output_item, "tool_calls", None):
+        return "tool_call"
     if item_type in TOOL_CALL_TYPES or (
         item_type is None and _response_get_attr(output_item, "call_id", None)
     ):
@@ -269,6 +271,7 @@ def build_responses_output_messages(
 
     for output_item in output_items or []:
         item_type = _response_get_attr(output_item, "type", None)
+        msg = _msg_to_dict(output_item) if not isinstance(output_item, dict) else output_item
         item_reason = _response_item_finish_reason(
             output_item,
             response_finish_reason=response_finish_reason,
@@ -279,6 +282,18 @@ def build_responses_output_messages(
         )
         if item_reason:
             finish_reasons.append(item_reason)
+
+        if item_type is None and "role" in msg:
+            role, parts = _convert_chat_message(msg)
+            if role and parts:
+                output_messages.append(
+                    {
+                        "role": role,
+                        "parts": parts,
+                        "finish_reason": item_reason,
+                    }
+                )
+            continue
 
         if item_type in TOOL_CALL_TYPES or (
             item_type is None and _response_get_attr(output_item, "call_id", None)
@@ -373,6 +388,101 @@ def extract_usage_attributes(usage) -> dict[str, int]:
     if reasoning_tokens is not None:
         attrs[SpanAttributes.GEN_AI_USAGE_REASONING_TOKENS] = reasoning_tokens
     return attrs
+
+
+def _build_generation_output_messages(output_data) -> tuple[list[dict], tuple[str, ...]]:
+    """Build OTel output messages from GenerationSpanData.output."""
+    if output_data is None:
+        output_items = []
+    elif isinstance(output_data, list):
+        output_items = output_data
+    else:
+        output_items = [{"role": "assistant", "content": output_data}]
+
+    output_messages = []
+    finish_reasons = []
+
+    for output_item in output_items:
+        if isinstance(output_item, str):
+            output_messages.append(
+                {
+                    "role": "assistant",
+                    "parts": [{"type": "text", "content": output_item}],
+                    "finish_reason": "",
+                }
+            )
+            continue
+
+        msg = _msg_to_dict(output_item) if not isinstance(output_item, dict) else output_item
+
+        if "role" in msg:
+            role, parts = _convert_chat_message(msg)
+            finish_reason = "tool_call" if msg.get("tool_calls") else ""
+        elif "type" in msg:
+            role, parts = _convert_agents_sdk_message(msg)
+            finish_reason = "tool_call" if msg.get("type") == "function_call" else ""
+        else:
+            role, parts, finish_reason = None, [], ""
+
+        if role and parts:
+            output_messages.append(
+                {
+                    "role": role,
+                    "parts": parts,
+                    "finish_reason": finish_reason,
+                }
+            )
+            if finish_reason:
+                finish_reasons.append(finish_reason)
+
+    return output_messages, tuple(dict.fromkeys(finish_reasons))
+
+
+def _extract_generation_span_data_attributes(otel_span, span_data, trace_content: bool):
+    """Extract response-like attributes directly from GenerationSpanData."""
+    model_config = getattr(span_data, "model_config", None) or {}
+
+    temperature = model_config.get("temperature")
+    if temperature is not None:
+        otel_span.set_attribute(GenAIAttributes.GEN_AI_REQUEST_TEMPERATURE, temperature)
+
+    max_output_tokens = model_config.get("max_output_tokens", model_config.get("max_tokens"))
+    if max_output_tokens is not None:
+        otel_span.set_attribute(GenAIAttributes.GEN_AI_REQUEST_MAX_TOKENS, max_output_tokens)
+
+    top_p = model_config.get("top_p")
+    if top_p is not None:
+        otel_span.set_attribute(GenAIAttributes.GEN_AI_REQUEST_TOP_P, top_p)
+
+    frequency_penalty = model_config.get("frequency_penalty")
+    if frequency_penalty is not None:
+        otel_span.set_attribute(
+            GenAIAttributes.GEN_AI_REQUEST_FREQUENCY_PENALTY,
+            frequency_penalty,
+        )
+
+    model = getattr(span_data, "model", None)
+    if model:
+        otel_span.set_attribute(GenAIAttributes.GEN_AI_RESPONSE_MODEL, model)
+
+    output_messages, finish_reasons = _build_generation_output_messages(
+        getattr(span_data, "output", None)
+    )
+    if trace_content and output_messages:
+        otel_span.set_attribute(
+            GenAIAttributes.GEN_AI_OUTPUT_MESSAGES,
+            json.dumps(output_messages),
+        )
+    if finish_reasons:
+        otel_span.set_attribute(
+            GenAIAttributes.GEN_AI_RESPONSE_FINISH_REASONS,
+            finish_reasons,
+        )
+
+    for attr_name, attr_value in extract_usage_attributes(
+        getattr(span_data, "usage", None)
+    ).items():
+        otel_span.set_attribute(attr_name, attr_value)
 
 
 def _content_block_to_part(block) -> dict:
@@ -1047,7 +1157,8 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
     def _end_generation_span(self, otel_span, span_data, trace_content):
         """Handle on_span_end logic for generation/response spans."""
         input_data = getattr(span_data, "input", [])
-        response = getattr(span_data, "response", None)
+        is_generation_span = type(span_data).__name__ == "GenerationSpanData"
+        response = None if is_generation_span else getattr(span_data, "response", None)
         if trace_content and response and getattr(response, "instructions", None):
             existing = input_data if isinstance(input_data, list) else []
             input_data = [{"role": "system", "content": response.instructions}] + existing
@@ -1063,7 +1174,9 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
                     GenAIAttributes.GEN_AI_TOOL_DEFINITIONS, json.dumps(tool_defs)
                 )
 
-        if response:
+        if is_generation_span:
+            _extract_generation_span_data_attributes(otel_span, span_data, trace_content)
+        elif response:
             _extract_response_attributes(otel_span, response, trace_content)
 
     def _end_function_span(self, otel_span, span_data, trace_content):
