@@ -606,3 +606,54 @@ def test_extract_response_attributes_sets_reasoning_tokens():
     span.set_attribute.assert_any_call(
         SpanAttributes.GEN_AI_USAGE_REASONING_TOKENS, 256
     )
+
+
+def test_extract_response_attributes_handles_dict_usage_and_nested_output_content():
+    """Responses-style dict usage and nested message content should both be captured."""
+    message = SimpleNamespace(
+        type="message",
+        status="completed",
+        role="assistant",
+        content=[SimpleNamespace(type="output_text", text="Here are the last 10 logs")],
+    )
+    response = SimpleNamespace(
+        output=[message],
+        model="gpt-4o",
+        id="resp_proxy",
+        temperature=None,
+        max_output_tokens=None,
+        top_p=None,
+        frequency_penalty=None,
+        finish_reason=None,
+        status=None,
+        usage={
+            "input_tokens": 20800,
+            "input_tokens_details": {"cached_tokens": 12243},
+            "output_tokens": 284,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 21084,
+        },
+    )
+    span = MagicMock()
+
+    _extract_response_attributes(span, response, trace_content=True)
+
+    span.set_attribute.assert_any_call(
+        GenAIAttributes.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, 12243
+    )
+    span.set_attribute.assert_any_call(
+        SpanAttributes.GEN_AI_USAGE_REASONING_TOKENS, 0
+    )
+
+    output_messages_call = next(
+        call for call in span.set_attribute.call_args_list
+        if call.args[0] == GenAIAttributes.GEN_AI_OUTPUT_MESSAGES
+    )
+    output_messages = json.loads(output_messages_call.args[1])
+    assert output_messages[0]["parts"][0]["content"] == "Here are the last 10 logs"
+
+    finish_reasons_call = next(
+        call for call in span.set_attribute.call_args_list
+        if call.args[0] == GenAIAttributes.GEN_AI_RESPONSE_FINISH_REASONS
+    )
+    assert finish_reasons_call.args[1] == ("stop",)

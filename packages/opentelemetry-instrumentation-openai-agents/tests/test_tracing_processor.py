@@ -15,6 +15,7 @@ These tests are written BEFORE the implementation (TDD).
 
 import json
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -887,27 +888,26 @@ class TestEndGenerationSpan:
         tracer, exporter = tracer_and_exporter
         otel_span = tracer.start_span("test-gen")
 
-        content_item = MagicMock()
-        content_item.type = "output_text"
-        content_item.text = "Hello!"
-
-        output_msg = MagicMock()
-        output_msg.type = "message"
-        output_msg.content = [content_item]
-        output_msg.role = "assistant"
-        output_msg.name = None
-
-        response = MagicMock()
-        response.tools = []
-        response.output = [output_msg]
-        response.model = "gpt-4o-mini"
-        response.id = "resp-abc"
-        response.temperature = 0.7
-        response.max_output_tokens = 100
-        response.top_p = 1.0
-        response.frequency_penalty = None
-        response.finish_reason = "stop"
-        response.usage = None
+        content_item = SimpleNamespace(type="output_text", text="Hello!")
+        output_msg = SimpleNamespace(
+            type="message",
+            content=[content_item],
+            role="assistant",
+            name=None,
+        )
+        response = SimpleNamespace(
+            tools=[],
+            output=[output_msg],
+            model="gpt-4o-mini",
+            id="resp-abc",
+            temperature=0.7,
+            max_output_tokens=100,
+            top_p=1.0,
+            frequency_penalty=None,
+            finish_reason="stop",
+            status=None,
+            usage=None,
+        )
 
         span_data = MagicMock()
         span_data.input = []

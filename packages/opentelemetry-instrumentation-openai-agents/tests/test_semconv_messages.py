@@ -9,6 +9,7 @@ Reference schemas: semconv-schemas/gen-ai-input-messages.json, gen-ai-output-mes
 
 import json
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -1575,28 +1576,26 @@ class TestContentGating:
         tracer, _ = tracer_and_exporter
         span = tracer.start_span("test")
 
-        response = MagicMock()
-        response.temperature = None
-        response.max_output_tokens = None
-        response.top_p = None
-        response.model = "gpt-4o"
-        response.id = "resp_1"
-        response.frequency_penalty = None
-        response.finish_reason = "stop"
-
-        content_item = MagicMock()
-        content_item.type = "output_text"
-        content_item.text = "secret output"
-
-        output_msg = MagicMock()
-        output_msg.type = "message"
-        output_msg.content = [content_item]
-        output_msg.role = "assistant"
-        output_msg.name = None  # Not a tool call
-
-        response.output = [output_msg]
-        response.usage = None
-        response.tools = None
+        content_item = SimpleNamespace(type="output_text", text="secret output")
+        output_msg = SimpleNamespace(
+            type="message",
+            content=[content_item],
+            role="assistant",
+            name=None,
+        )
+        response = SimpleNamespace(
+            temperature=None,
+            max_output_tokens=None,
+            top_p=None,
+            model="gpt-4o",
+            id="resp_1",
+            frequency_penalty=None,
+            finish_reason="stop",
+            status=None,
+            output=[output_msg],
+            usage=None,
+            tools=None,
+        )
 
         _extract_response_attributes(span, response, trace_content=False)
 
@@ -1633,17 +1632,19 @@ class TestContentGating:
         tool_mock.function = func_mock
         tool_mock.type = "function"
 
-        response_mock = MagicMock()
-        response_mock.tools = [tool_mock]
-        response_mock.output = []
-        response_mock.usage = None
-        response_mock.temperature = None
-        response_mock.max_output_tokens = None
-        response_mock.top_p = None
-        response_mock.model = "gpt-4o"
-        response_mock.id = "resp_1"
-        response_mock.frequency_penalty = None
-        response_mock.finish_reason = None
+        response_mock = SimpleNamespace(
+            tools=[tool_mock],
+            output=[],
+            usage=None,
+            temperature=None,
+            max_output_tokens=None,
+            top_p=None,
+            model="gpt-4o",
+            id="resp_1",
+            frequency_penalty=None,
+            finish_reason=None,
+            status=None,
+        )
         gen_data.response = response_mock
 
         with patch(
@@ -2049,29 +2050,30 @@ class TestOutputNonTextParts:
         tracer, _ = tracer_and_exporter
         span = tracer.start_span("test")
 
-        response = MagicMock()
-        response.temperature = None
-        response.max_output_tokens = None
-        response.top_p = None
-        response.model = "gpt-4o"
-        response.id = "resp_1"
-        response.frequency_penalty = None
-        response.finish_reason = "stop"
-
-        content_item = MagicMock()
-        content_item.type = "refusal"
-        content_item.refusal = "I cannot help with that."
-        content_item.text = None
-
-        output_msg = MagicMock()
-        output_msg.type = "message"
-        output_msg.content = [content_item]
-        output_msg.role = "assistant"
-        output_msg.name = None
-
-        response.output = [output_msg]
-        response.usage = None
-        response.tools = None
+        content_item = SimpleNamespace(
+            type="refusal",
+            refusal="I cannot help with that.",
+            text=None,
+        )
+        output_msg = SimpleNamespace(
+            type="message",
+            content=[content_item],
+            role="assistant",
+            name=None,
+        )
+        response = SimpleNamespace(
+            temperature=None,
+            max_output_tokens=None,
+            top_p=None,
+            model="gpt-4o",
+            id="resp_1",
+            frequency_penalty=None,
+            finish_reason="stop",
+            status=None,
+            output=[output_msg],
+            usage=None,
+            tools=None,
+        )
 
         _extract_response_attributes(span, response, trace_content=True)
 
@@ -2094,28 +2096,25 @@ class TestOutputNonTextParts:
         tracer, _ = tracer_and_exporter
         span = tracer.start_span("test")
 
-        response = MagicMock()
-        response.temperature = None
-        response.max_output_tokens = None
-        response.top_p = None
-        response.model = "gpt-4o"
-        response.id = "resp_1"
-        response.frequency_penalty = None
-        response.finish_reason = None  # Unknown/absent
-        response.status = None
-
-        content_item = MagicMock()
-        content_item.type = "output_text"
-        content_item.text = "Hello"
-
-        output_msg = MagicMock()
-        output_msg.type = "message"
-        output_msg.content = [content_item]
-        output_msg.role = "assistant"
-        output_msg.name = None
-
-        response.output = [output_msg]
-        response.usage = None
+        content_item = SimpleNamespace(type="output_text", text="Hello")
+        output_msg = SimpleNamespace(
+            type="message",
+            content=[content_item],
+            role="assistant",
+            name=None,
+        )
+        response = SimpleNamespace(
+            temperature=None,
+            max_output_tokens=None,
+            top_p=None,
+            model="gpt-4o",
+            id="resp_1",
+            frequency_penalty=None,
+            finish_reason=None,
+            status=None,
+            output=[output_msg],
+            usage=None,
+        )
 
         _extract_response_attributes(span, response, trace_content=True)
 
@@ -2138,27 +2137,25 @@ class TestOutputNonTextParts:
         tracer, _ = tracer_and_exporter
         span = tracer.start_span("test")
 
-        response = MagicMock()
-        response.temperature = None
-        response.max_output_tokens = None
-        response.top_p = None
-        response.model = "gpt-4o"
-        response.id = "resp_1"
-        response.frequency_penalty = None
-        response.finish_reason = "tool_calls"  # OpenAI plural
-
-        content_item = MagicMock()
-        content_item.type = "output_text"
-        content_item.text = "Calling tool"
-
-        output_msg = MagicMock()
-        output_msg.type = "message"
-        output_msg.content = [content_item]
-        output_msg.role = "assistant"
-        output_msg.name = None
-
-        response.output = [output_msg]
-        response.usage = None
+        content_item = SimpleNamespace(type="output_text", text="Calling tool")
+        output_msg = SimpleNamespace(
+            type="message",
+            content=[content_item],
+            role="assistant",
+            name=None,
+        )
+        response = SimpleNamespace(
+            temperature=None,
+            max_output_tokens=None,
+            top_p=None,
+            model="gpt-4o",
+            id="resp_1",
+            frequency_penalty=None,
+            finish_reason="tool_calls",
+            status=None,
+            output=[output_msg],
+            usage=None,
+        )
 
         _extract_response_attributes(span, response, trace_content=True)
 
@@ -2179,31 +2176,30 @@ class TestOutputNonTextParts:
         tracer, _ = tracer_and_exporter
         span = tracer.start_span("test")
 
-        response = MagicMock()
-        response.temperature = None
-        response.max_output_tokens = None
-        response.top_p = None
-        response.model = "gpt-4o"
-        response.id = "resp_1"
-        response.frequency_penalty = None
-        response.finish_reason = "stop"
-
-        content_item = MagicMock()
-        content_item.type = "reasoning"
-        content_item.text = None
-
-        summary_item = MagicMock()
-        summary_item.text = "The user wants weather info"
-        content_item.summary = [summary_item]
-
-        output_msg = MagicMock()
-        output_msg.type = "message"
-        output_msg.content = [content_item]
-        output_msg.role = "assistant"
-        output_msg.name = None
-
-        response.output = [output_msg]
-        response.usage = None
+        summary_item = SimpleNamespace(text="The user wants weather info")
+        content_item = SimpleNamespace(
+            type="reasoning",
+            text=None,
+            summary=[summary_item],
+        )
+        output_msg = SimpleNamespace(
+            type="message",
+            content=[content_item],
+            role="assistant",
+            name=None,
+        )
+        response = SimpleNamespace(
+            temperature=None,
+            max_output_tokens=None,
+            top_p=None,
+            model="gpt-4o",
+            id="resp_1",
+            frequency_penalty=None,
+            finish_reason="stop",
+            status=None,
+            output=[output_msg],
+            usage=None,
+        )
 
         _extract_response_attributes(span, response, trace_content=True)
 

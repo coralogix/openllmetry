@@ -138,6 +138,22 @@ class TestMultiOutputFinishReasons:
         assert msgs[0]["finish_reason"] == "stop"
         assert _get_finish_reasons(span) == ("stop",)
 
+    def test_statusless_response_uses_output_item_status(self, span):
+        """When response.status is missing, per-item status should still drive finish_reason."""
+        output = SimpleNamespace(
+            type="message",
+            status="completed",
+            role="assistant",
+            content=[SimpleNamespace(type="output_text", text="Done")],
+        )
+        response = _make_response(output=[output], finish_reason=None)
+
+        _extract(span, response)
+
+        msgs = _get_output_messages(span)
+        assert msgs[0]["finish_reason"] == "stop"
+        assert _get_finish_reasons(span) == ("stop",)
+
     def test_multiple_text_messages_dedup_finish_reason(self, span):
         """Two text outputs with the same finish_reason should dedup to one top-level entry."""
         response = _make_response(
