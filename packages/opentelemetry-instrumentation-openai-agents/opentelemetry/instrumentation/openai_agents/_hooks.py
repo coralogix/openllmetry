@@ -397,45 +397,21 @@ def _build_generation_output_messages(output_data) -> tuple[list[dict], tuple[st
     elif isinstance(output_data, list):
         output_items = output_data
     else:
+        # Backward compatibility: scalar output is an assistant text message.
         output_items = [{"role": "assistant", "content": output_data}]
 
-    output_messages = []
-    finish_reasons = []
-
+    normalized_items = []
     for output_item in output_items:
         if isinstance(output_item, str):
-            output_messages.append(
-                {
-                    "role": "assistant",
-                    "parts": [{"type": "text", "content": output_item}],
-                    "finish_reason": "",
-                }
-            )
-            continue
-
-        msg = _msg_to_dict(output_item) if not isinstance(output_item, dict) else output_item
-
-        if "role" in msg:
-            role, parts = _convert_chat_message(msg)
-            finish_reason = "tool_call" if msg.get("tool_calls") else ""
-        elif "type" in msg:
-            role, parts = _convert_agents_sdk_message(msg)
-            finish_reason = "tool_call" if msg.get("type") == "function_call" else ""
+            # Backward compatibility: string list items are assistant text messages.
+            normalized_items.append({"role": "assistant", "content": output_item})
         else:
-            role, parts, finish_reason = None, [], ""
+            normalized_items.append(output_item)
 
-        if role and parts:
-            output_messages.append(
-                {
-                    "role": role,
-                    "parts": parts,
-                    "finish_reason": finish_reason,
-                }
-            )
-            if finish_reason:
-                finish_reasons.append(finish_reason)
-
-    return output_messages, tuple(dict.fromkeys(finish_reasons))
+    return build_responses_output_messages(
+        normalized_items,
+        parse_arguments=_parse_arguments,
+    )
 
 
 def _extract_generation_span_data_attributes(otel_span, span_data, trace_content: bool):
