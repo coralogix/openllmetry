@@ -392,21 +392,36 @@ def extract_usage_attributes(usage) -> dict[str, int]:
 
 def _build_generation_output_messages(output_data) -> tuple[list[dict], tuple[str, ...]]:
     """Build OTel output messages from GenerationSpanData.output."""
+    def _append_normalized_item(items: list, candidate):
+        if isinstance(candidate, str):
+            # Backward compatibility: string list items are assistant text messages.
+            items.append({"role": "assistant", "content": candidate})
+            return
+
+        nested_output = _response_get_attr(candidate, "output", None)
+        if _response_get_attr(candidate, "object", None) == "response" and nested_output:
+            if isinstance(nested_output, list):
+                for nested_item in nested_output:
+                    _append_normalized_item(items, nested_item)
+            else:
+                _append_normalized_item(items, nested_output)
+            return
+
+        items.append(candidate)
+
     if output_data is None:
         output_items = []
     elif isinstance(output_data, list):
         output_items = output_data
+    elif _response_get_attr(output_data, "object", None) == "response":
+        output_items = [_response_get_attr(output_data, "output", [])]
     else:
         # Backward compatibility: scalar output is an assistant text message.
         output_items = [{"role": "assistant", "content": output_data}]
 
     normalized_items = []
     for output_item in output_items:
-        if isinstance(output_item, str):
-            # Backward compatibility: string list items are assistant text messages.
-            normalized_items.append({"role": "assistant", "content": output_item})
-        else:
-            normalized_items.append(output_item)
+        _append_normalized_item(normalized_items, output_item)
 
     return build_responses_output_messages(
         normalized_items,
