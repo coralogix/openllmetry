@@ -426,6 +426,8 @@ def _build_generation_output_messages(output_data) -> tuple[list[dict], tuple[st
     return build_responses_output_messages(
         normalized_items,
         parse_arguments=_parse_arguments,
+        preserve_incomplete_status=True,
+        preserve_cancelled_status=True,
     )
 
 

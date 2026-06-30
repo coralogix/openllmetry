@@ -69,6 +69,13 @@ def _extract(span, response, trace_content=True):
     return _extract_response_attributes(span, response, trace_content)
 
 
+def _build_generation_output(output):
+    from opentelemetry.instrumentation.openai_agents._hooks import (
+        _build_generation_output_messages,
+    )
+    return _build_generation_output_messages(output)
+
+
 def _get_output_messages(span):
     raw = span.attributes.get(GenAIAttributes.GEN_AI_OUTPUT_MESSAGES)
     return json.loads(raw) if raw else []
@@ -251,6 +258,25 @@ class TestMultiOutputFinishReasons:
         msgs = _get_output_messages(span)
         assert msgs[0]["finish_reason"] == "error"
         assert _get_finish_reasons(span) == ("error",)
+
+
+class TestGenerationOutputFinishReasons:
+    @pytest.mark.parametrize("status", ["cancelled", "incomplete"])
+    def test_generation_output_preserves_responses_statuses(self, status):
+        """GenerationSpanData output should preserve Responses-style lifecycle statuses."""
+        output = [
+            SimpleNamespace(
+                type="message",
+                status=status,
+                role="assistant",
+                content=[SimpleNamespace(type="output_text", text="Partial")],
+            )
+        ]
+
+        msgs, finish_reasons = _build_generation_output(output)
+
+        assert msgs[0]["finish_reason"] == status
+        assert finish_reasons == (status,)
 
 
 class TestFinishReasonsWithoutContent:
