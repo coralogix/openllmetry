@@ -547,7 +547,9 @@ def test_handoff_span_operation_name(exporter, handoff_agent):
         )
 
 
-def _make_fake_response(cached_tokens=None, reasoning_tokens=None):
+def _make_fake_response(
+    cached_tokens=None, cache_creation_tokens=None, reasoning_tokens=None
+):
     """Build a duck-typed Response that exercises only the usage path of
     _extract_response_attributes. Other fields are absent so the helper's
     hasattr/getattr guards short-circuit them.
@@ -568,7 +570,14 @@ def _make_fake_response(cached_tokens=None, reasoning_tokens=None):
           }
       - OpenAI Responses API spec: https://platform.openai.com/docs/api-reference/responses
     """
-    input_details = SimpleNamespace(cached_tokens=cached_tokens) if cached_tokens is not None else None
+    input_details = (
+        SimpleNamespace(
+            cached_tokens=cached_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        )
+        if cached_tokens is not None or cache_creation_tokens is not None
+        else None
+    )
     output_details = (
         SimpleNamespace(reasoning_tokens=reasoning_tokens) if reasoning_tokens is not None else None
     )
@@ -592,6 +601,20 @@ def test_extract_response_attributes_sets_cache_read_input_tokens():
 
     span.set_attribute.assert_any_call(
         GenAIAttributes.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, 1024
+    )
+
+
+def test_extract_response_attributes_sets_cache_creation_input_tokens():
+    """_extract_response_attributes must read
+    usage.input_tokens_details.cache_creation_tokens and set
+    gen_ai.usage.cache_creation.input_tokens on the span."""
+    response = _make_fake_response(cache_creation_tokens=2048)
+    span = MagicMock()
+
+    _extract_response_attributes(span, response, trace_content=False)
+
+    span.set_attribute.assert_any_call(
+        GenAIAttributes.GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS, 2048
     )
 
 
@@ -628,7 +651,10 @@ def test_extract_response_attributes_handles_dict_usage_and_nested_output_conten
         status=None,
         usage={
             "input_tokens": 20800,
-            "input_tokens_details": {"cached_tokens": 12243},
+            "input_tokens_details": {
+                "cached_tokens": 12243,
+                "cache_creation_tokens": 4096,
+            },
             "output_tokens": 284,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 21084,
@@ -640,6 +666,9 @@ def test_extract_response_attributes_handles_dict_usage_and_nested_output_conten
 
     span.set_attribute.assert_any_call(
         GenAIAttributes.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, 12243
+    )
+    span.set_attribute.assert_any_call(
+        GenAIAttributes.GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS, 4096
     )
     span.set_attribute.assert_any_call(
         SpanAttributes.GEN_AI_USAGE_REASONING_TOKENS, 0

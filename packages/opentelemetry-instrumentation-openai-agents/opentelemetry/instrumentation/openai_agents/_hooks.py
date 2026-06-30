@@ -370,6 +370,9 @@ def extract_usage_attributes(usage) -> dict[str, int]:
     if input_details is None:
         input_details = _response_get_attr(usage, "prompt_tokens_details", None)
     cached_tokens = _response_get_attr(input_details, "cached_tokens", None)
+    cache_creation_tokens = _response_get_attr(
+        input_details, "cache_creation_tokens", None
+    )
 
     output_details = _response_get_attr(usage, "output_tokens_details", None)
     if output_details is None:
@@ -385,6 +388,10 @@ def extract_usage_attributes(usage) -> dict[str, int]:
         attrs[SpanAttributes.GEN_AI_USAGE_TOTAL_TOKENS] = total_tokens
     if cached_tokens is not None:
         attrs[GenAIAttributes.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] = cached_tokens
+    if cache_creation_tokens is not None:
+        attrs[GenAIAttributes.GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS] = (
+            cache_creation_tokens
+        )
     if reasoning_tokens is not None:
         attrs[SpanAttributes.GEN_AI_USAGE_REASONING_TOKENS] = reasoning_tokens
     return attrs
