@@ -15,6 +15,7 @@ These tests are written BEFORE the implementation (TDD).
 
 import json
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -664,9 +665,10 @@ class TestEndGenerationSpan:
         tracer, exporter = tracer_and_exporter
         otel_span = tracer.start_span("test-gen")
 
-        span_data = MagicMock()
-        span_data.input = [{"role": "user", "content": "Hello"}]
-        span_data.response = None
+        span_data = SimpleNamespace(
+            input=[{"role": "user", "content": "Hello"}],
+            response=None,
+        )
 
         processor._end_generation_span(otel_span, span_data, trace_content=True)
 
@@ -887,27 +889,26 @@ class TestEndGenerationSpan:
         tracer, exporter = tracer_and_exporter
         otel_span = tracer.start_span("test-gen")
 
-        content_item = MagicMock()
-        content_item.type = "output_text"
-        content_item.text = "Hello!"
-
-        output_msg = MagicMock()
-        output_msg.type = "message"
-        output_msg.content = [content_item]
-        output_msg.role = "assistant"
-        output_msg.name = None
-
-        response = MagicMock()
-        response.tools = []
-        response.output = [output_msg]
-        response.model = "gpt-4o-mini"
-        response.id = "resp-abc"
-        response.temperature = 0.7
-        response.max_output_tokens = 100
-        response.top_p = 1.0
-        response.frequency_penalty = None
-        response.finish_reason = "stop"
-        response.usage = None
+        content_item = SimpleNamespace(type="output_text", text="Hello!")
+        output_msg = SimpleNamespace(
+            type="message",
+            content=[content_item],
+            role="assistant",
+            name=None,
+        )
+        response = SimpleNamespace(
+            tools=[],
+            output=[output_msg],
+            model="gpt-4o-mini",
+            id="resp-abc",
+            temperature=0.7,
+            max_output_tokens=100,
+            top_p=1.0,
+            frequency_penalty=None,
+            finish_reason="stop",
+            status=None,
+            usage=None,
+        )
 
         span_data = MagicMock()
         span_data.input = []
@@ -920,14 +921,291 @@ class TestEndGenerationSpan:
 
         otel_span.end()
 
+    def test_generation_span_data_uses_output_and_usage_fields(self, tracer_and_exporter, processor):
+        """Real GenerationSpanData stores output/usage on the span data itself."""
+        from agents import GenerationSpanData
+
+        tracer, _ = tracer_and_exporter
+        otel_span = tracer.start_span("test-gen")
+
+        span_data = GenerationSpanData(
+            input=[{"role": "user", "content": "Hello"}],
+            output=[{"role": "assistant", "content": "Hello back"}],
+            model="gpt-4o-mini",
+            model_config={
+                "temperature": 0.7,
+                "max_tokens": 100,
+                "top_p": 1.0,
+                "frequency_penalty": 0.5,
+            },
+            usage={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+        )
+
+        processor._end_generation_span(otel_span, span_data, trace_content=True)
+
+        assert otel_span.attributes.get(GenAIAttributes.GEN_AI_RESPONSE_MODEL) == "gpt-4o-mini"
+        assert otel_span.attributes.get(GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS) == 3
+        raw = otel_span.attributes.get(GenAIAttributes.GEN_AI_OUTPUT_MESSAGES)
+        assert raw is not None
+        messages = json.loads(raw)
+        assert messages[0]["role"] == "assistant"
+        assert messages[0]["parts"][0]["content"] == "Hello back"
+
+        otel_span.end()
+
+    def test_generation_span_data_supports_responses_message_item(self, tracer_and_exporter, processor):
+        """Generation output items use Responses API message-item shape."""
+        from agents import GenerationSpanData
+
+        tracer, _ = tracer_and_exporter
+        otel_span = tracer.start_span("test-gen")
+
+        span_data = GenerationSpanData(
+            input=[],
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Hello from response item"}],
+                }
+            ],
+            model="gpt-4o-mini",
+            model_config={},
+            usage=None,
+        )
+
+        processor._end_generation_span(otel_span, span_data, trace_content=True)
+
+        raw = otel_span.attributes.get(GenAIAttributes.GEN_AI_OUTPUT_MESSAGES)
+        assert raw is not None
+        messages = json.loads(raw)
+        assert len(messages) == 1
+        assert messages[0]["role"] == "assistant"
+        assert messages[0]["parts"][0] == {"type": "text", "content": "Hello from response item"}
+        assert messages[0]["finish_reason"] == "stop"
+
+        finish_reasons = otel_span.attributes.get(GenAIAttributes.GEN_AI_RESPONSE_FINISH_REASONS)
+        assert finish_reasons is not None
+        assert "stop" in finish_reasons
+
+        otel_span.end()
+
+    def test_generation_span_data_supports_message_and_function_call_items(
+        self, tracer_and_exporter, processor
+    ):
+        """Generation output items preserve message + function_call ordering and parsing."""
+        from agents import GenerationSpanData
+
+        tracer, _ = tracer_and_exporter
+        otel_span = tracer.start_span("test-gen")
+
+        span_data = GenerationSpanData(
+            input=[],
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Now let me fetch logs"}],
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_123",
+                    "call_id": "fc_123",
+                    "name": "query_dataprime",
+                    "status": "completed",
+                    "arguments": '{"query": "source logs | limit 10"}',
+                },
+            ],
+            model="gpt-4o-mini",
+            model_config={},
+            usage=None,
+        )
+
+        processor._end_generation_span(otel_span, span_data, trace_content=True)
+
+        raw = otel_span.attributes.get(GenAIAttributes.GEN_AI_OUTPUT_MESSAGES)
+        assert raw is not None
+        messages = json.loads(raw)
+        assert len(messages) == 2
+
+        assert messages[0]["parts"][0] == {"type": "text", "content": "Now let me fetch logs"}
+        assert messages[0]["finish_reason"] == "stop"
+
+        tool_part = messages[1]["parts"][0]
+        assert tool_part["type"] == "tool_call"
+        assert tool_part["name"] == "query_dataprime"
+        assert tool_part["id"] == "fc_123"
+        assert tool_part["arguments"] == {"query": "source logs | limit 10"}
+        assert messages[1]["finish_reason"] == "tool_call"
+
+        finish_reasons = otel_span.attributes.get(GenAIAttributes.GEN_AI_RESPONSE_FINISH_REASONS)
+        assert finish_reasons is not None
+        assert "stop" in finish_reasons
+        assert "tool_call" in finish_reasons
+
+        otel_span.end()
+
+    def test_generation_span_data_unwraps_full_response_envelopes(
+        self, tracer_and_exporter, processor
+    ):
+        """Generation output may arrive as full response envelopes, not raw output items."""
+        from agents import GenerationSpanData
+
+        tracer, _ = tracer_and_exporter
+        otel_span = tracer.start_span("test-gen")
+
+        span_data = GenerationSpanData(
+            input=[],
+            output=[
+                {
+                    "id": "litellm_resp_1",
+                    "object": "response",
+                    "model": "litellm_proxy/claude-haiku-4-5",
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "Now let me query the last 10 logs:",
+                                }
+                            ],
+                        },
+                        {
+                            "type": "function_call",
+                            "id": "fc_8efb88024d23496d82c242f6e3664738",
+                            "call_id": "fc_8efb88024d23496d82c242f6e3664738",
+                            "name": "query_dataprime",
+                            "status": "completed",
+                            "arguments": (
+                                '{"query": "source logs | limit 10", '
+                                '"description": "Retrieve the last 10 logs", '
+                                '"time_filters": {"interval":"1h"}}'
+                            ),
+                        },
+                    ],
+                }
+            ],
+            model="gpt-4o-mini",
+            model_config={},
+            usage=None,
+        )
+
+        processor._end_generation_span(otel_span, span_data, trace_content=True)
+
+        raw = otel_span.attributes.get(GenAIAttributes.GEN_AI_OUTPUT_MESSAGES)
+        assert raw is not None
+        messages = json.loads(raw)
+        assert len(messages) == 2
+        assert messages[0]["parts"][0]["content"] == "Now let me query the last 10 logs:"
+
+        tool_part = messages[1]["parts"][0]
+        assert tool_part["type"] == "tool_call"
+        assert tool_part["name"] == "query_dataprime"
+        assert tool_part["id"] == "fc_8efb88024d23496d82c242f6e3664738"
+        assert tool_part["arguments"] == {
+            "query": "source logs | limit 10",
+            "description": "Retrieve the last 10 logs",
+            "time_filters": {"interval": "1h"},
+        }
+
+        finish_reasons = otel_span.attributes.get(GenAIAttributes.GEN_AI_RESPONSE_FINISH_REASONS)
+        assert finish_reasons is not None
+        assert "stop" in finish_reasons
+        assert "tool_call" in finish_reasons
+
+        otel_span.end()
+
+    def test_generation_span_data_supports_reasoning_and_multiple_tool_calls(
+        self, tracer_and_exporter, processor
+    ):
+        """Generation output items should include top-level reasoning and tool-call items."""
+        from agents import GenerationSpanData
+
+        tracer, _ = tracer_and_exporter
+        otel_span = tracer.start_span("test-gen")
+
+        span_data = GenerationSpanData(
+            input=[],
+            output=[
+                {
+                    "type": "reasoning",
+                    "content": [
+                        {
+                            "type": "reasoning_text",
+                            "text": "The user asked for recent logs.",
+                        }
+                    ],
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "Load skills and query the last 10 logs.",
+                        }
+                    ],
+                    "status": None,
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": ""}],
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_975e0",
+                    "call_id": "fc_975e0",
+                    "name": "load_skill",
+                    "status": "completed",
+                    "arguments": '{"skill_name": "dataprime"}',
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_2cb11",
+                    "call_id": "fc_2cb11",
+                    "name": "load_skill",
+                    "status": "completed",
+                    "arguments": '{"skill_name": "logs"}',
+                },
+            ],
+            model="gpt-4o-mini",
+            model_config={},
+            usage=None,
+        )
+
+        processor._end_generation_span(otel_span, span_data, trace_content=True)
+
+        raw = otel_span.attributes.get(GenAIAttributes.GEN_AI_OUTPUT_MESSAGES)
+        assert raw is not None
+        messages = json.loads(raw)
+        assert len(messages) == 4
+
+        assert messages[0]["role"] == "assistant"
+        assert messages[0]["parts"][0]["type"] == "reasoning_text"
+        assert "recent logs" in messages[0]["parts"][0]["content"]
+
+        assert messages[2]["parts"][0]["type"] == "tool_call"
+        assert messages[3]["parts"][0]["type"] == "tool_call"
+
+        finish_reasons = otel_span.attributes.get(GenAIAttributes.GEN_AI_RESPONSE_FINISH_REASONS)
+        assert finish_reasons is not None
+        assert "stop" in finish_reasons
+        assert "tool_call" in finish_reasons
+
+        otel_span.end()
+
     def test_no_response_no_crash(self, tracer_and_exporter, processor):
         """span_data.response=None must not raise."""
         tracer, exporter = tracer_and_exporter
         otel_span = tracer.start_span("test-gen")
 
-        span_data = MagicMock()
-        span_data.input = []
-        span_data.response = None
+        span_data = SimpleNamespace(
+            input=[],
+            response=None,
+        )
 
         # Should not raise
         processor._end_generation_span(otel_span, span_data, trace_content=True)

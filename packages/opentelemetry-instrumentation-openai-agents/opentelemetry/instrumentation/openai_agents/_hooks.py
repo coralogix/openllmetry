@@ -1,6 +1,6 @@
 """Hook-based instrumentation for OpenAI Agents using the SDK's native callback system."""
 
-from typing import Dict, Any
+from typing import Dict, Any, Callable, Optional
 import json
 import time
 from collections import OrderedDict
@@ -46,7 +46,6 @@ except ImportError:
     TranscriptionSpanData = None
     SpeechGroupSpanData = None
 
-
 # ---------------------------------------------------------------------------
 # Finish-reason mapping: OpenAI → OTel GenAI semconv
 # ---------------------------------------------------------------------------
@@ -64,12 +63,80 @@ _FINISH_REASON_MAP = {
     "incomplete": "incomplete",  # may be content_filter or token limit; preserve semantics
 }
 
+TOOL_CALL_TYPES = {
+    "function_call",
+    "file_search_call",
+    "web_search_call",
+    "computer_call",
+    "code_interpreter_call",
+}
+
 
 def _map_finish_reason(raw):
     """Map a provider-specific finish reason to the OTel enum value."""
     if raw is None:
         return None
     return _FINISH_REASON_MAP.get(raw, raw)
+
+
+def _response_get_attr(obj: Any, name: str, default=None):
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _map_responses_finish_reason(
+    raw_reason: Optional[str],
+    *,
+    incomplete_reason: Optional[str] = None,
+    preserve_incomplete_status: bool = False,
+    preserve_cancelled_status: bool = False,
+) -> str:
+    if not raw_reason:
+        return ""
+    if raw_reason == "cancelled":
+        return "cancelled" if preserve_cancelled_status else "error"
+    if raw_reason == "incomplete":
+        if preserve_incomplete_status:
+            return "incomplete"
+        if incomplete_reason == "content_filter":
+            return "content_filter"
+        return "length"
+    mapped_reason = _map_finish_reason(raw_reason)
+    return mapped_reason or ""
+
+
+def _response_item_finish_reason(
+    output_item,
+    *,
+    response_finish_reason: Optional[str] = None,
+    response_status: Optional[str] = None,
+    incomplete_reason: Optional[str] = None,
+    preserve_incomplete_status: bool = False,
+    preserve_cancelled_status: bool = False,
+) -> str:
+    item_type = _response_get_attr(output_item, "type", None)
+    if _response_get_attr(output_item, "tool_calls", None):
+        return "tool_call"
+    if item_type in TOOL_CALL_TYPES or (
+        item_type is None and _response_get_attr(output_item, "call_id", None)
+    ):
+        return "tool_call"
+
+    raw_reason = _response_get_attr(output_item, "finish_reason", None)
+    if not raw_reason:
+        raw_reason = (
+            _response_get_attr(output_item, "status", None)
+            or response_finish_reason
+            or response_status
+        )
+
+    return _map_responses_finish_reason(
+        raw_reason,
+        incomplete_reason=incomplete_reason,
+        preserve_incomplete_status=preserve_incomplete_status,
+        preserve_cancelled_status=preserve_cancelled_status,
+    )
 
 
 def _parse_arguments(args):
@@ -162,6 +229,253 @@ def _reasoning_text(s):
     if isinstance(s, dict):
         return s.get("text", "")
     return getattr(s, "text", str(s))
+
+
+def _response_content_item_to_part(content_item) -> dict:
+    ci_type = _response_get_attr(content_item, "type", None)
+
+    if ci_type == "output_text":
+        return {"type": "text", "content": _response_get_attr(content_item, "text", "")}
+    if ci_type == "refusal":
+        return {
+            "type": "refusal",
+            "content": _response_get_attr(content_item, "refusal", ""),
+        }
+    if ci_type == "reasoning":
+        summary = _response_get_attr(content_item, "summary", None)
+        text = ""
+        if isinstance(summary, list):
+            text = " ".join(_reasoning_text(item) for item in summary)
+        elif summary:
+            text = str(summary)
+        return {"type": "reasoning", "content": text}
+    if ci_type is not None:
+        return {"type": ci_type, "content": str(content_item)}
+    if hasattr(content_item, "text") and content_item.text:
+        return {"type": "text", "content": content_item.text}
+    return {"type": "unknown", "content": str(content_item)}
+
+
+def build_responses_output_messages(
+    output_items,
+    *,
+    response_finish_reason: Optional[str] = None,
+    response_status: Optional[str] = None,
+    incomplete_reason: Optional[str] = None,
+    parse_arguments: Callable[[Any], Any],
+    preserve_incomplete_status: bool = False,
+    preserve_cancelled_status: bool = False,
+) -> tuple[list[dict], tuple[str, ...]]:
+    output_messages = []
+    finish_reasons = []
+
+    for output_item in output_items or []:
+        item_type = _response_get_attr(output_item, "type", None)
+        msg = _msg_to_dict(output_item) if not isinstance(output_item, dict) else output_item
+        item_reason = _response_item_finish_reason(
+            output_item,
+            response_finish_reason=response_finish_reason,
+            response_status=response_status,
+            incomplete_reason=incomplete_reason,
+            preserve_incomplete_status=preserve_incomplete_status,
+            preserve_cancelled_status=preserve_cancelled_status,
+        )
+        if item_reason:
+            finish_reasons.append(item_reason)
+
+        if item_type is None and "role" in msg:
+            role, parts = _convert_chat_message(msg)
+            if role and parts:
+                output_messages.append(
+                    {
+                        "role": role,
+                        "parts": parts,
+                        "finish_reason": item_reason,
+                    }
+                )
+            continue
+
+        if item_type in TOOL_CALL_TYPES or (
+            item_type is None and _response_get_attr(output_item, "call_id", None)
+        ):
+            part: dict = {
+                "type": "tool_call",
+                "name": _response_get_attr(output_item, "name", "unknown_tool"),
+            }
+            tool_call_id = _response_get_attr(output_item, "call_id", None)
+            if tool_call_id:
+                part["id"] = tool_call_id
+            raw_args = _response_get_attr(output_item, "arguments", None)
+            if raw_args is not None:
+                part["arguments"] = parse_arguments(raw_args)
+            output_messages.append(
+                {
+                    "role": "assistant",
+                    "parts": [part],
+                    "finish_reason": item_reason,
+                }
+            )
+            continue
+
+        content = _response_get_attr(output_item, "content", None)
+        if content:
+            parts = [_response_content_item_to_part(content_item) for content_item in content]
+            output_messages.append(
+                {
+                    "role": _response_get_attr(output_item, "role", "assistant"),
+                    "parts": parts,
+                    "finish_reason": item_reason,
+                }
+            )
+            continue
+
+        text = _response_get_attr(output_item, "text", None)
+        if text:
+            output_messages.append(
+                {
+                    "role": _response_get_attr(output_item, "role", "assistant"),
+                    "parts": [{"type": "text", "content": text}],
+                    "finish_reason": item_reason,
+                }
+            )
+
+    overall_reason = _map_responses_finish_reason(
+        response_finish_reason or response_status,
+        incomplete_reason=incomplete_reason,
+        preserve_incomplete_status=preserve_incomplete_status,
+        preserve_cancelled_status=preserve_cancelled_status,
+    )
+    meaningful_reasons = tuple(dict.fromkeys(reason for reason in finish_reasons if reason))
+    if not meaningful_reasons and overall_reason:
+        meaningful_reasons = (overall_reason,)
+
+    return output_messages, meaningful_reasons
+
+
+def extract_usage_attributes(usage) -> dict[str, int]:
+    if not usage:
+        return {}
+
+    input_tokens = _response_get_attr(usage, "input_tokens", None)
+    if input_tokens is None:
+        input_tokens = _response_get_attr(usage, "prompt_tokens", None)
+
+    output_tokens = _response_get_attr(usage, "output_tokens", None)
+    if output_tokens is None:
+        output_tokens = _response_get_attr(usage, "completion_tokens", None)
+
+    total_tokens = _response_get_attr(usage, "total_tokens", None)
+
+    input_details = _response_get_attr(usage, "input_tokens_details", None)
+    if input_details is None:
+        input_details = _response_get_attr(usage, "prompt_tokens_details", None)
+    cached_tokens = _response_get_attr(input_details, "cached_tokens", None)
+
+    output_details = _response_get_attr(usage, "output_tokens_details", None)
+    if output_details is None:
+        output_details = _response_get_attr(usage, "completion_tokens_details", None)
+    reasoning_tokens = _response_get_attr(output_details, "reasoning_tokens", None)
+
+    attrs = {}
+    if input_tokens is not None:
+        attrs[GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS] = input_tokens
+    if output_tokens is not None:
+        attrs[GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS] = output_tokens
+    if total_tokens is not None:
+        attrs[SpanAttributes.GEN_AI_USAGE_TOTAL_TOKENS] = total_tokens
+    if cached_tokens is not None:
+        attrs[GenAIAttributes.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] = cached_tokens
+    if reasoning_tokens is not None:
+        attrs[SpanAttributes.GEN_AI_USAGE_REASONING_TOKENS] = reasoning_tokens
+    return attrs
+
+
+def _build_generation_output_messages(output_data) -> tuple[list[dict], tuple[str, ...]]:
+    """Build OTel output messages from GenerationSpanData.output."""
+    def _append_normalized_item(items: list, candidate):
+        if isinstance(candidate, str):
+            # Backward compatibility: string list items are assistant text messages.
+            items.append({"role": "assistant", "content": candidate})
+            return
+
+        nested_output = _response_get_attr(candidate, "output", None)
+        if _response_get_attr(candidate, "object", None) == "response" and nested_output:
+            if isinstance(nested_output, list):
+                for nested_item in nested_output:
+                    _append_normalized_item(items, nested_item)
+            else:
+                _append_normalized_item(items, nested_output)
+            return
+
+        items.append(candidate)
+
+    if output_data is None:
+        output_items = []
+    elif isinstance(output_data, list):
+        output_items = output_data
+    elif _response_get_attr(output_data, "object", None) == "response":
+        output_items = [_response_get_attr(output_data, "output", [])]
+    else:
+        # Backward compatibility: scalar output is an assistant text message.
+        output_items = [{"role": "assistant", "content": output_data}]
+
+    normalized_items = []
+    for output_item in output_items:
+        _append_normalized_item(normalized_items, output_item)
+
+    return build_responses_output_messages(
+        normalized_items,
+        parse_arguments=_parse_arguments,
+        preserve_incomplete_status=True,
+        preserve_cancelled_status=True,
+    )
+
+
+def _extract_generation_span_data_attributes(otel_span, span_data, trace_content: bool):
+    """Extract response-like attributes directly from GenerationSpanData."""
+    model_config = getattr(span_data, "model_config", None) or {}
+
+    temperature = model_config.get("temperature")
+    if temperature is not None:
+        otel_span.set_attribute(GenAIAttributes.GEN_AI_REQUEST_TEMPERATURE, temperature)
+
+    max_output_tokens = model_config.get("max_output_tokens", model_config.get("max_tokens"))
+    if max_output_tokens is not None:
+        otel_span.set_attribute(GenAIAttributes.GEN_AI_REQUEST_MAX_TOKENS, max_output_tokens)
+
+    top_p = model_config.get("top_p")
+    if top_p is not None:
+        otel_span.set_attribute(GenAIAttributes.GEN_AI_REQUEST_TOP_P, top_p)
+
+    frequency_penalty = model_config.get("frequency_penalty")
+    if frequency_penalty is not None:
+        otel_span.set_attribute(
+            GenAIAttributes.GEN_AI_REQUEST_FREQUENCY_PENALTY,
+            frequency_penalty,
+        )
+
+    model = getattr(span_data, "model", None)
+    if model:
+        otel_span.set_attribute(GenAIAttributes.GEN_AI_RESPONSE_MODEL, model)
+
+    output_messages, finish_reasons = _build_generation_output_messages(
+        getattr(span_data, "output", None)
+    )
+    if trace_content and output_messages:
+        otel_span.set_attribute(
+            GenAIAttributes.GEN_AI_OUTPUT_MESSAGES,
+            json.dumps(output_messages),
+        )
+    if finish_reasons:
+        otel_span.set_attribute(
+            GenAIAttributes.GEN_AI_RESPONSE_FINISH_REASONS,
+            finish_reasons,
+        )
+
+    for attr_name, attr_value in extract_usage_attributes(
+        getattr(span_data, "usage", None)
+    ).items():
+        otel_span.set_attribute(attr_name, attr_value)
 
 
 def _content_block_to_part(block) -> dict:
@@ -444,107 +758,25 @@ def _extract_response_attributes(otel_span, response, trace_content: bool):
     # when trace_content=False.  Message content is only serialised when trace_content
     # is True.
     if hasattr(response, "output") and response.output:
-        output_messages = []
-        per_item_reasons: list = []
-
-        for output in response.output:
-            item_type = getattr(output, "type", None)
-
-            if item_type == "function_call" or (
-                item_type is None and getattr(output, "call_id", None)
-            ):
-                # Function/tool call always contributes "tool_call" regardless of
-                # the response-level finish_reason.
-                item_reason = _map_finish_reason("tool_calls")
-                per_item_reasons.append(item_reason)
-
-                if trace_content:
-                    tool_name = getattr(output, "name", "unknown_tool")
-                    tool_call_id = getattr(output, "call_id", None)
-                    part: dict = {"type": "tool_call", "name": tool_name}
-                    if tool_call_id:
-                        part["id"] = tool_call_id
-                    raw_args = getattr(output, "arguments", None)
-                    if raw_args is not None:
-                        part["arguments"] = _parse_arguments(raw_args)
-                    output_messages.append({
-                        "role": "assistant",
-                        "parts": [part],
-                        "finish_reason": item_reason,
-                    })
-
-            elif hasattr(output, "content") and output.content:
-                # Text message with content array (ResponseOutputMessage)
-                item_reason = mapped_finish_reason or ""
-                per_item_reasons.append(item_reason)
-
-                if trace_content:
-                    parts = []
-                    for content_item in output.content:
-                        ci_type = getattr(content_item, "type", None)
-                        # Check known types first; use hasattr(.text) only as last resort
-                        # to avoid misclassifying reasoning/refusal items that also carry .text
-                        if ci_type == "output_text":
-                            parts.append({
-                                "type": "text",
-                                "content": getattr(content_item, "text", ""),
-                            })
-                        elif ci_type == "refusal":
-                            parts.append({
-                                "type": "refusal",
-                                "content": getattr(content_item, "refusal", ""),
-                            })
-                        elif ci_type == "reasoning":
-                            summary = getattr(content_item, "summary", None)
-                            text = ""
-                            if isinstance(summary, list):
-                                text = " ".join(_reasoning_text(s) for s in summary)
-                            elif summary:
-                                text = str(summary)
-                            parts.append({"type": "reasoning", "content": text})
-                        elif ci_type is not None:
-                            parts.append({
-                                "type": ci_type,
-                                "content": str(content_item),
-                            })
-                        elif hasattr(content_item, "text") and content_item.text:
-                            parts.append({
-                                "type": "text",
-                                "content": content_item.text,
-                            })
-                    output_messages.append({
-                        "role": getattr(output, "role", "assistant"),
-                        "parts": parts,
-                        "finish_reason": item_reason,
-                    })
-
-            elif hasattr(output, "text"):
-                # Direct text content
-                item_reason = mapped_finish_reason or ""
-                per_item_reasons.append(item_reason)
-
-                if trace_content:
-                    parts = []
-                    if output.text:
-                        parts.append({"type": "text", "content": output.text})
-                    output_messages.append({
-                        "role": getattr(output, "role", "assistant"),
-                        "parts": parts,
-                        "finish_reason": item_reason,
-                    })
-
+        output_messages, meaningful_reasons = build_responses_output_messages(
+            response.output,
+            response_finish_reason=getattr(response, "finish_reason", None),
+            response_status=getattr(response, "status", None),
+            incomplete_reason=(
+                getattr(getattr(response, "incomplete_details", None), "reason", None)
+            ),
+            parse_arguments=_parse_arguments,
+            preserve_incomplete_status=True,
+            preserve_cancelled_status=True,
+        )
         if trace_content and output_messages:
             otel_span.set_attribute(
                 GenAIAttributes.GEN_AI_OUTPUT_MESSAGES, json.dumps(output_messages)
             )
-
-        # Set top-level finish_reasons from per-item discovery; fall back to the
-        # response-level reason if no output items provided reasons.
-        meaningful_reasons = list(dict.fromkeys(r for r in per_item_reasons if r))
         if meaningful_reasons:
             otel_span.set_attribute(
                 GenAIAttributes.GEN_AI_RESPONSE_FINISH_REASONS,
-                tuple(meaningful_reasons),
+                meaningful_reasons,
             )
         elif mapped_finish_reason is not None:
             otel_span.set_attribute(
@@ -560,47 +792,8 @@ def _extract_response_attributes(otel_span, response, trace_content: bool):
 
     # Extract usage data
     if hasattr(response, "usage") and response.usage:
-        usage = response.usage
-        if hasattr(usage, "input_tokens") and usage.input_tokens is not None:
-            otel_span.set_attribute(
-                GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens
-            )
-        elif hasattr(usage, "prompt_tokens") and usage.prompt_tokens is not None:
-            otel_span.set_attribute(
-                GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS, usage.prompt_tokens
-            )
-
-        if hasattr(usage, "output_tokens") and usage.output_tokens is not None:
-            otel_span.set_attribute(
-                GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens
-            )
-        elif (
-            hasattr(usage, "completion_tokens") and usage.completion_tokens is not None
-        ):
-            otel_span.set_attribute(
-                GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS, usage.completion_tokens
-            )
-
-        if hasattr(usage, "total_tokens") and usage.total_tokens is not None:
-            otel_span.set_attribute(
-                SpanAttributes.GEN_AI_USAGE_TOTAL_TOKENS, usage.total_tokens
-            )
-
-        input_details = getattr(usage, "input_tokens_details", None)
-        if input_details is not None:
-            cached_tokens = getattr(input_details, "cached_tokens", None)
-            if cached_tokens is not None:
-                otel_span.set_attribute(
-                    GenAIAttributes.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, cached_tokens
-                )
-
-        output_details = getattr(usage, "output_tokens_details", None)
-        if output_details is not None:
-            reasoning_tokens = getattr(output_details, "reasoning_tokens", None)
-            if reasoning_tokens is not None:
-                otel_span.set_attribute(
-                    SpanAttributes.GEN_AI_USAGE_REASONING_TOKENS, reasoning_tokens
-                )
+        for attr_name, attr_value in extract_usage_attributes(response.usage).items():
+            otel_span.set_attribute(attr_name, attr_value)
 
     return model_settings
 
@@ -957,7 +1150,8 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
     def _end_generation_span(self, otel_span, span_data, trace_content):
         """Handle on_span_end logic for generation/response spans."""
         input_data = getattr(span_data, "input", [])
-        response = getattr(span_data, "response", None)
+        is_generation_span = type(span_data).__name__ == "GenerationSpanData"
+        response = None if is_generation_span else getattr(span_data, "response", None)
         if trace_content and response and getattr(response, "instructions", None):
             existing = input_data if isinstance(input_data, list) else []
             input_data = [{"role": "system", "content": response.instructions}] + existing
@@ -973,7 +1167,9 @@ class OpenTelemetryTracingProcessor(TracingProcessor):
                     GenAIAttributes.GEN_AI_TOOL_DEFINITIONS, json.dumps(tool_defs)
                 )
 
-        if response:
+        if is_generation_span:
+            _extract_generation_span_data_attributes(otel_span, span_data, trace_content)
+        elif response:
             _extract_response_attributes(otel_span, response, trace_content)
 
     def _end_function_span(self, otel_span, span_data, trace_content):
